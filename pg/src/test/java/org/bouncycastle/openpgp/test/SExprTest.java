@@ -1,15 +1,18 @@
 package org.bouncycastle.openpgp.test;
 
 import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.security.Security;
 
 import org.bouncycastle.gpg.SExprParser;
+import org.bouncycastle.gpg.SExpression;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.bouncycastle.openpgp.PGPPrivateKey;
 import org.bouncycastle.openpgp.PGPSecretKey;
 import org.bouncycastle.openpgp.operator.jcajce.JcaKeyFingerprintCalculator;
 import org.bouncycastle.openpgp.operator.jcajce.JcaPGPDigestCalculatorProviderBuilder;
 import org.bouncycastle.openpgp.operator.jcajce.JcePBEProtectionRemoverFactory;
+import org.bouncycastle.util.Strings;
 import org.bouncycastle.util.encoders.Base64;
 import org.bouncycastle.util.test.SimpleTest;
 
@@ -169,6 +172,46 @@ public class SExprTest
         {
             PGPPrivateKey key = parser.parseSecretKey(this.getClass().getResourceAsStream("/pgpdata/" + keyDirs[i] + "/private-keys-v1.d/priv.key"),
                 null, new JcaKeyFingerprintCalculator()).extractPrivateKey(null);
+        }
+
+        corruptLengthTest();
+    }
+
+    private void corruptLengthTest()
+    {
+        // a negative canonical-string length must be a clean IOException, not NegativeArraySizeException
+        try
+        {
+            SExpression.parse(new ByteArrayInputStream(Strings.toByteArray("(-5:")), 2);
+            fail("no exception");
+        }
+        catch (IOException e)
+        {
+            isEquals("invalid negative length in S-Expression", e.getMessage());
+        }
+
+        // a large declared canonical-string length over a truncated stream must fail with an
+        // EOFException rather than pre-allocating the declared size (github #2338)
+        try
+        {
+            SExpression.parse(new ByteArrayInputStream(Strings.toByteArray("(67108864:)")), 2);
+            fail("no exception");
+        }
+        catch (IOException e)
+        {
+            isEquals("premature end of stream", e.getMessage());
+        }
+
+        // exploit: the maximum declared length from a dozen input bytes - pre-allocating
+        // new byte[Integer.MAX_VALUE] fails with OutOfMemoryError before any data is read
+        try
+        {
+            SExpression.parse(new ByteArrayInputStream(Strings.toByteArray("(2147483647:abc)")), 2);
+            fail("no exception");
+        }
+        catch (IOException e)
+        {
+            isEquals("premature end of stream", e.getMessage());
         }
     }
 
