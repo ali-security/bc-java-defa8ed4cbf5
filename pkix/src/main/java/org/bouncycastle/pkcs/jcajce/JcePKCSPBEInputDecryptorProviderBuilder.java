@@ -1,6 +1,8 @@
 package org.bouncycastle.pkcs.jcajce;
 
+import java.io.IOException;
 import java.io.InputStream;
+import java.math.BigInteger;
 import java.security.AlgorithmParameters;
 import java.security.Provider;
 
@@ -41,6 +43,7 @@ import org.bouncycastle.operator.InputDecryptor;
 import org.bouncycastle.operator.InputDecryptorProvider;
 import org.bouncycastle.operator.OperatorCreationException;
 import org.bouncycastle.operator.SecretKeySizeProvider;
+import org.bouncycastle.util.Properties;
 
 public class JcePKCSPBEInputDecryptorProviderBuilder
 {
@@ -121,6 +124,10 @@ public class JcePKCSPBEInputDecryptorProviderBuilder
                         {
                             ScryptParams params = ScryptParams.getInstance(alg.getKeyDerivationFunc().getParameters());
                             AlgorithmIdentifier encScheme = AlgorithmIdentifier.getInstance(alg.getEncryptionScheme());
+
+                            // The scrypt cost parameters travel in the (unauthenticated) encrypted
+                            // container, so bound them before the memory/CPU intensive derivation.
+                            checkScryptCost(params);
 
                             SecretKeyFactory keyFact = helper.createSecretKeyFactory("SCRYPT");
 
@@ -207,6 +214,43 @@ public class JcePKCSPBEInputDecryptorProviderBuilder
                 };
             }
         };
+    }
+
+    // Hard sanity bound on the scrypt block size r; the standard value is 8, anything beyond this
+    // is rejected as abusive.
+    private static final int MAX_SCRYPT_BLOCK_SIZE = 1024;
+
+    private static void checkScryptCost(ScryptParams params)
+        throws IOException
+    {
+        BigInteger n = params.getCostParameter();
+        BigInteger r = params.getBlockSize();
+        BigInteger p = params.getParallelizationParameter();
+
+        if (n == null || r == null || p == null
+            || n.signum() <= 0 || r.signum() <= 0 || p.signum() <= 0
+            || n.bitLength() > 31 || r.bitLength() > 31 || p.bitLength() > 31)
+        {
+            throw new IOException("invalid scrypt parameters");
+        }
+
+        long blockSize = r.longValue();
+        if (blockSize > MAX_SCRYPT_BLOCK_SIZE)
+        {
+            throw new IOException("scrypt block size (" + blockSize + ") greater than " + MAX_SCRYPT_BLOCK_SIZE);
+        }
+
+        long maxMemory = Properties.asInteger(Properties.PBE_MAX_SCRYPT_MEMORY, 1 << 30);
+        // scrypt allocates ~128*r*N bytes (the V array) and ~128*r*p bytes (the B array), RFC 7914.
+        // The parallelization parameter p was previously unbounded, so a crafted key with small N
+        // and p near the engine's overflow ceiling (~2e6) allocated hundreds of MB past this budget.
+        // Bound N and p separately against the budget rather than their sum, so the N-only limit is
+        // preserved exactly (a key with N at the boundary still loads) while p is bounded.
+        long maxCost = maxMemory / (128L * blockSize);
+        if (n.longValue() > maxCost || p.longValue() > maxCost)
+        {
+            throw new IOException("scrypt cost parameters require more than " + maxMemory + " bytes");
+        }
     }
 
     private boolean isCCMorGCM(ASN1Encodable encParams)
